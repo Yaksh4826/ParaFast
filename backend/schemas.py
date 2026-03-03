@@ -1,6 +1,20 @@
 from pydantic import BaseModel
 
 
+class SignupRequest(BaseModel):
+    badge_number: str
+    first_name: str
+    last_name: str
+    team_number: str
+    phone_number: str | None = None
+    password: str
+
+
+class LoginRequest(BaseModel):
+    badge_number: str
+    password: str
+
+
 class OccurrenceReport(BaseModel):
     call_number: str
     vehicle_id: str
@@ -10,7 +24,8 @@ class OccurrenceReport(BaseModel):
 
 
 class UpdateDraftRequest(BaseModel):
-    badge_number: str
     patch: dict
 
 
+class AgentChatRequest(BaseModel):
+    message: str
