@@ -1,8 +1,9 @@
 import asyncio
 import base64
-import os
 import logging
+import os
 import uuid
+from datetime import datetime, timezone
 from typing import Any, Dict, Optional
 
 from dicttoxml import dicttoxml
@@ -69,6 +70,26 @@ app.add_middleware(
 )
 logger = logging.getLogger(__name__)
 supabase = get_supabase_client()
+
+
+@app.get("/test-email")
+async def test_email():
+    """Send a test email to verify Resend is working. Check your inbox (and spam)."""
+    api_key = os.getenv("RESEND_API_KEY")
+    target = os.getenv("TARGET_DISPATCH_EMAIL", "yakshpatel4826@gmail.com")
+    if not api_key:
+        return {"ok": False, "error": "RESEND_API_KEY not set in .env"}
+    try:
+        resend.api_key = api_key
+        resend.Emails.send({
+            "from": "ParaFast AI <onboarding@resend.dev>",
+            "to": [target],
+            "subject": "ParaFast Test Email",
+            "html": "<p>If you got this, Resend is working.</p>",
+        })
+        return {"ok": True, "to": target, "message": "Check your inbox (and spam folder)"}
+    except Exception as exc:
+        return {"ok": False, "error": str(exc), "hint": "Resend sandbox may only send to your Resend account email. Verify domain at resend.com/domains to send anywhere."}
 
 
 @app.get("/")
@@ -189,7 +210,7 @@ def upsert_draft(badge_number: str, content: Dict[str, Any], status: str) -> Non
             "badge_number": badge_number,
             "content": content,
             "status": status,
-            "updated_at": "now()",
+            "updated_at": datetime.now(timezone.utc).isoformat(),
         },
         on_conflict="badge_number",
     ).execute()
@@ -197,6 +218,13 @@ def upsert_draft(badge_number: str, content: Dict[str, Any], status: str) -> Non
 
 def generate_xml_content(data: Dict[str, Any]) -> bytes:
     return dicttoxml(data or {}, custom_root="occurrence_report", attr_type=False)
+
+
+def _ascii_safe(s: str) -> str:
+    """Replace non-ASCII chars so FPDF latin-1 encoding works."""
+    if not s:
+        return ""
+    return str(s).replace("\u2014", "-").replace("\u2013", "-").encode("ascii", "replace").decode("ascii")
 
 
 def generate_pdf_content(data: Dict[str, Any]) -> bytes:
@@ -210,7 +238,7 @@ def generate_pdf_content(data: Dict[str, Any]) -> bytes:
         pdf.cell(0, 10, "No content available.", ln=True)
     else:
         for key, value in data.items():
-            pdf.multi_cell(0, 8, f"{key}: {value}")
+            pdf.multi_cell(0, 8, f"{key}: {_ascii_safe(str(value))}")
             pdf.ln(1)
     return pdf.output(dest="S").encode("latin-1")
 

@@ -1,8 +1,9 @@
-"""Supervisor / Orchestrator — Supervisor-Worker pattern with LangGraph.
+"""Supervisor / Orchestrator - Supervisor-Worker pattern with LangGraph.
 
 Graph topology:
   START -> supervisor -> SHIFT_AGENT -> shift_agent <-> shift_tools -> supervisor
                       -> SCRIBE_AGENT -> scribe_agent -> supervisor
+                      -> PRESHIFT_AGENT -> preshift_agent -> supervisor | scribe_agent
                       -> FINISH -> END
 """
 
@@ -32,7 +33,12 @@ try:
         shift_router,
         shift_tool_node,
     )
-    from backend.app.agents.scribe_agent import scribe_agent_node
+    from backend.app.agents.scribe_agent import (
+        scribe_agent_node,
+        scribe_router,
+        scribe_tool_executor,
+    )
+    from backend.app.agents.preshift_agent import preshift_agent_node, preshift_router
     from backend.database import get_supabase_client
 except ModuleNotFoundError:
     from app.agents.state import AgentState  # type: ignore
@@ -42,12 +48,17 @@ except ModuleNotFoundError:
         shift_router,
         shift_tool_node,
     )
-    from app.agents.scribe_agent import scribe_agent_node  # type: ignore
+    from app.agents.scribe_agent import (  # type: ignore
+        scribe_agent_node,
+        scribe_router,
+        scribe_tool_executor,
+    )
+    from app.agents.preshift_agent import preshift_agent_node, preshift_router  # type: ignore
     from database import get_supabase_client  # type: ignore
 
 
-WORKERS = {"SHIFT_AGENT", "SCRIBE_AGENT", "FINISH"}
-_ROUTING_TOKENS = ("SHIFT_AGENT", "SCRIBE_AGENT", "FINISH")
+WORKERS = {"SHIFT_AGENT", "SCRIBE_AGENT", "PRESHIFT_AGENT", "FINISH"}
+_ROUTING_TOKENS = ("SHIFT_AGENT", "SCRIBE_AGENT", "PRESHIFT_AGENT", "FINISH")
 
 
 def _fetch_user_profile(badge_number: str) -> Dict[str, Any] | None:
@@ -99,11 +110,14 @@ Today's date is {today} ({today_weekday}). The current year is {year}.
 
 You MUST output EXACTLY one routing token on the FIRST LINE, then your message:
 
-  SHIFT_AGENT   — schedule stuff (lookup shifts, swap, day off, populate schedule)
-  SCRIBE_AGENT  — reports and forms (occurrence report, accident report, documentation)
+  SHIFT_AGENT    — ONLY for: shifts, schedule, day off, swap, populate schedule, when do I work
+  SCRIBE_AGENT   — ONLY for: reports, forms, incident, occurrence, teddy bear, teddy form, document, ACRC, complete report
+  PRESHIFT_AGENT — ONLY for: ready to start shift, preshift, checklist, start my shift, am I good to go
   FINISH        — you can answer directly, or the task is already done
 
 {user_context}
+
+ROUTING: teddy/report/form/incident/occurrence/document/ACRC/complete -> SCRIBE_AGENT. schedule/shift/day off/swap -> SHIFT_AGENT. ready to start shift/preshift/checklist/start my shift -> PRESHIFT_AGENT.
 
 IMPORTANT RULES:
 - ALWAYS put the routing token on the very first line, then your conversational message.
@@ -146,6 +160,26 @@ User: "i had a patient incident i need to document"
 Your response:
 SCRIBE_AGENT
 Oh no, hope everyone's okay. Let me get the report started for you.
+
+User: "I want to submit a teddy form that I gave to a six year old"
+Your response:
+SCRIBE_AGENT
+Got it — passing you to the report team.
+
+User: "i need to document an occurrence"
+Your response:
+SCRIBE_AGENT
+Sure, I'll get that started for you.
+
+User: "Para AI, I'm ready to start my shift" or "am I good to go?"
+Your response:
+PRESHIFT_AGENT
+Let me check your status real quick!
+
+User: "help me finish those ACRCs" or "I want to complete the overdue reports"
+Your response:
+SCRIBE_AGENT
+Got it - passing you to the report team to get that done.
 
 User: "thanks that worked"
 Your response:
@@ -233,6 +267,8 @@ def supervisor_router(state: AgentState) -> str:
         return "shift_agent"
     if nw == "SCRIBE_AGENT":
         return "scribe_agent"
+    if nw == "PRESHIFT_AGENT":
+        return "preshift_agent"
     return "end"
 
 
@@ -246,13 +282,26 @@ def build_graph() -> Any:
     g.add_node("shift_agent", shift_agent_node)
     g.add_node("shift_tools", shift_tool_node)
     g.add_node("scribe_agent", scribe_agent_node)
+    g.add_node("scribe_tools", scribe_tool_executor)
+    g.add_node("preshift_agent", preshift_agent_node)
 
     g.set_entry_point("supervisor")
 
     g.add_conditional_edges(
         "supervisor",
         supervisor_router,
-        {"shift_agent": "shift_agent", "scribe_agent": "scribe_agent", "end": END},
+        {
+            "shift_agent": "shift_agent",
+            "scribe_agent": "scribe_agent",
+            "preshift_agent": "preshift_agent",
+            "end": END,
+        },
+    )
+
+    g.add_conditional_edges(
+        "preshift_agent",
+        preshift_router,
+        {"scribe_agent": "scribe_agent", "supervisor": "supervisor"},
     )
 
     g.add_conditional_edges(
@@ -261,8 +310,14 @@ def build_graph() -> Any:
         {"shift_tools": "shift_tools", "supervisor": "supervisor"},
     )
 
+    g.add_conditional_edges(
+        "scribe_agent",
+        scribe_router,
+        {"scribe_tools": "scribe_tools", "supervisor": "supervisor"},
+    )
+
     g.add_edge("shift_tools", "shift_agent")
-    g.add_edge("scribe_agent", "supervisor")
+    g.add_edge("scribe_tools", "scribe_agent")
 
     return g.compile()
 

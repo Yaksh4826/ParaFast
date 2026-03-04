@@ -166,7 +166,7 @@ def _parse_text_tool_calls(content: str) -> list[dict]:
     return calls
 
 
-_ROUTING_TOKENS = ("SHIFT_AGENT", "SCRIBE_AGENT", "FINISH")
+_ROUTING_TOKENS = ("SHIFT_AGENT", "SCRIBE_AGENT", "PRESHIFT_AGENT", "FINISH")
 
 
 def _is_supervisor_routing_msg(msg) -> bool:
