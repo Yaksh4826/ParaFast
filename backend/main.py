@@ -1,5 +1,6 @@
 import asyncio
 import base64
+import json
 import logging
 import os
 import uuid
@@ -24,10 +25,14 @@ if __package__ is None or __package__ == "":
     sys.path.append(str(pathlib.Path(__file__).resolve().parent))
     from database import get_supabase_client  # type: ignore
     from auth import (  # type: ignore
+        COOKIE_MAX_AGE,
+        COOKIE_NAME,
+        create_access_token,
+        decode_token,
+        get_current_user,
+        get_current_user_optional,
         hash_password,
         verify_password,
-        create_access_token,
-        get_current_user,
     )
     from schemas import (  # type: ignore
         SignupRequest,
@@ -37,13 +42,18 @@ if __package__ is None or __package__ == "":
         AgentChatRequest,
     )
     from app.agents.supervisor import run_supervisor  # type: ignore
+    from app.voice.handler import handle_voice_websocket  # type: ignore
 else:
     from .database import get_supabase_client
     from .auth import (
+        COOKIE_MAX_AGE,
+        COOKIE_NAME,
+        create_access_token,
+        decode_token,
+        get_current_user,
+        get_current_user_optional,
         hash_password,
         verify_password,
-        create_access_token,
-        get_current_user,
     )
     from .schemas import (
         SignupRequest,
@@ -53,14 +63,17 @@ else:
         AgentChatRequest,
     )
     from .app.agents.supervisor import run_supervisor  # type: ignore
+    from .app.voice.handler import handle_voice_websocket  # type: ignore
 
 from collections import defaultdict
+from fastapi import WebSocket, WebSocketDisconnect
 from fastapi.middleware.cors import CORSMiddleware
-from fastapi.responses import FileResponse
+from fastapi.responses import FileResponse, JSONResponse
 
-app = FastAPI(title="ParaFast — EMS Multi-Agent System")
+app = FastAPI(title="ParaFast - EMS Multi-Agent System")
 
 _chat_histories: dict[str, list] = defaultdict(list)
+_voice_histories: dict[str, list] = defaultdict(list)
 app.add_middleware(
     CORSMiddleware,
     allow_origins=["*"],
@@ -75,21 +88,97 @@ supabase = get_supabase_client()
 @app.get("/test-email")
 async def test_email():
     """Send a test email to verify Resend is working. Check your inbox (and spam)."""
-    api_key = os.getenv("RESEND_API_KEY")
-    target = os.getenv("TARGET_DISPATCH_EMAIL", "yakshpatel4826@gmail.com")
+    api_key = (os.getenv("RESEND_API_KEY") or "").strip()
+    target = (os.getenv("TARGET_DISPATCH_EMAIL") or "yakshpatel4826@gmail.com").strip()
+    from_addr = (os.getenv("RESEND_FROM_EMAIL") or "").strip() or "ParaFast AI <onboarding@resend.dev>"
     if not api_key:
         return {"ok": False, "error": "RESEND_API_KEY not set in .env"}
     try:
         resend.api_key = api_key
-        resend.Emails.send({
-            "from": "ParaFast AI <onboarding@resend.dev>",
+        resp = resend.Emails.send({
+            "from": from_addr,
             "to": [target],
             "subject": "ParaFast Test Email",
             "html": "<p>If you got this, Resend is working.</p>",
         })
-        return {"ok": True, "to": target, "message": "Check your inbox (and spam folder)"}
+        email_id = getattr(resp, "id", None) or (resp.get("id") if isinstance(resp, dict) else None)
+        return {
+            "ok": True,
+            "to": target,
+            "id": email_id,
+            "message": "Check your inbox (and spam folder)",
+            "hint": "If you don't receive it: (1) Check spam. (2) TARGET_DISPATCH_EMAIL must match your Resend account email when using onboarding@resend.dev. (3) Verify a domain at resend.com/domains and set RESEND_FROM_EMAIL=ParaFast <reports@yourdomain.com> to send to any address.",
+        }
     except Exception as exc:
-        return {"ok": False, "error": str(exc), "hint": "Resend sandbox may only send to your Resend account email. Verify domain at resend.com/domains to send anywhere."}
+        return {"ok": False, "error": str(exc), "hint": "Verify domain at resend.com/domains. Without it, you can only send to your Resend account email."}
+
+
+def _get_cookie_from_scope(scope: dict, name: str) -> str:
+    """Extract cookie value from ASGI scope headers."""
+    for h, v in scope.get("headers", []):
+        if h == b"cookie":
+            for part in v.decode().split(";"):
+                part = part.strip()
+                if part.startswith(name + "="):
+                    return part.split("=", 1)[1].strip().strip('"')
+    return ""
+
+
+@app.websocket("/ws/voice")
+async def ws_voice(websocket: WebSocket):
+    """Voice session: token from cookie, query ?token=, or handshake message."""
+    await websocket.accept()
+    badge_number = ""
+    try:
+        token = _get_cookie_from_scope(websocket.scope, COOKIE_NAME)
+        if not token:
+            query = websocket.scope.get("query_string", b"").decode()
+            params = dict(p.split("=", 1) for p in query.split("&") if "=" in p)
+            token = params.get("token", "")
+        if token:
+            try:
+                payload = decode_token(token)
+                badge_number = payload.get("sub", "")
+            except Exception:
+                pass
+        if not badge_number:
+            first_msg = await websocket.receive()
+            if first_msg.get("type") == "websocket.receive" and "text" in first_msg:
+                try:
+                    data = json.loads(first_msg["text"])
+                    if data.get("type") == "handshake":
+                        token = data.get("token", "")
+                        if token:
+                            payload = decode_token(token)
+                            badge_number = payload.get("sub", "")
+                except Exception:
+                    pass
+        if not badge_number:
+            await websocket.send_json({"type": "error", "detail": "Unauthorized. Connect with ?token=JWT or send handshake with token."})
+            await websocket.close(code=4001)
+            return
+        history = _voice_histories[badge_number]
+        await handle_voice_websocket(websocket, badge_number, history)
+    except WebSocketDisconnect:
+        pass
+    except Exception as exc:
+        logger.exception("Voice WebSocket: %s", exc)
+        try:
+            await websocket.send_json({"type": "error", "detail": str(exc)})
+        except Exception:
+            pass
+
+
+@app.get("/voice")
+async def serve_voice_ui():
+    import pathlib
+    base = pathlib.Path(__file__).resolve().parent
+    html_path = base / "voice.html"
+    if not html_path.exists():
+        html_path = base.parent / "backend" / "voice.html"
+    if not html_path.exists():
+        raise HTTPException(status_code=500, detail="voice.html not found")
+    return FileResponse(str(html_path), media_type="text/html")
 
 
 @app.get("/")
@@ -126,12 +215,14 @@ async def signup(req: SignupRequest):
     }).execute()
 
     token = create_access_token(req.badge_number, profile_id)
-    return {
+    response = JSONResponse(content={
         "access_token": token,
         "token_type": "bearer",
         "badge_number": req.badge_number,
         "name": f"{req.first_name} {req.last_name}",
-    }
+    })
+    response.set_cookie(key=COOKIE_NAME, value=token, max_age=COOKIE_MAX_AGE, httponly=True, samesite="lax")
+    return response
 
 
 @app.post("/auth/login")
@@ -148,23 +239,27 @@ async def login(req: LoginRequest):
         raise HTTPException(status_code=401, detail="Invalid badge number or password.")
 
     user = rows[0]
-    if not verify_password(req.password, user.get("password_hash", "")):
+    if not verify_password(req.password, user.get("password_hash")):
         raise HTTPException(status_code=401, detail="Invalid badge number or password.")
 
     token = create_access_token(user["badge_number"], user["id"])
-    return {
+    response = JSONResponse(content={
         "access_token": token,
         "token_type": "bearer",
         "badge_number": user["badge_number"],
         "name": f"{user['first_name']} {user['last_name']}",
-    }
+    })
+    response.set_cookie(key=COOKIE_NAME, value=token, max_age=COOKIE_MAX_AGE, httponly=True, samesite="lax")
+    return response
 
 
 @app.post("/auth/logout")
-async def logout(user: dict = Depends(get_current_user)):
-    badge = user["sub"]
-    _chat_histories.pop(badge, None)
-    return {"ok": True}
+async def logout(user: dict | None = Depends(get_current_user_optional)):
+    response = JSONResponse(content={"ok": True})
+    response.delete_cookie(key=COOKIE_NAME)
+    if user:
+        _chat_histories.pop(user.get("sub"), None)
+    return response
 
 
 @app.get("/auth/me")

@@ -4,7 +4,7 @@ from __future__ import annotations
 
 from datetime import datetime, timezone
 from pathlib import Path
-from typing import Any, Dict
+from typing import Any, Dict, Optional
 
 from dotenv import load_dotenv
 
@@ -15,6 +15,27 @@ try:
     from backend.database import get_supabase_client
 except ModuleNotFoundError:
     from database import get_supabase_client  # type: ignore
+
+
+def get_draft(badge_number: str) -> Optional[Dict[str, Any]]:
+    """Load pending draft for user. Returns None if none or already submitted."""
+    try:
+        sb = get_supabase_client()
+        resp = (
+            sb.table("form_drafts")
+            .select("content, status, updated_at")
+            .eq("badge_number", badge_number)
+            .limit(1)
+            .execute()
+        )
+        if not resp.data:
+            return None
+        row = resp.data[0]
+        if row.get("status") != "pending":
+            return None
+        return {"content": row.get("content") or {}, "status": "pending", "updated_at": row.get("updated_at")}
+    except Exception:
+        return None
 
 
 def save_draft(badge_number: str, content: Dict[str, Any], status: str = "pending") -> Dict[str, Any]:

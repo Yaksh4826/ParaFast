@@ -41,6 +41,7 @@ def _is_supervisor_routing_msg(msg) -> bool:
 def _build_preshift_prompt(ctx: Dict[str, Any]) -> str:
     first = ctx.get("first_name", "Unknown")
     bad_items = ctx.get("bad_items", [])
+    blocking = ctx.get("blocking_items", [])
     prev_shift = ctx.get("previous_shift")
     acrc_reminder = ctx.get("acrc_reminder", "ACRs must be completed within 24 hours of call completion.")
     cert_reminder = ctx.get("cert_reminder", "Flag if Drivers License not sent or vaccinations not up to date.")
@@ -49,6 +50,7 @@ def _build_preshift_prompt(ctx: Dict[str, Any]) -> str:
         f"- {item.get('check_type', '')}: {item.get('detail', 'needs attention')}"
         for item in bad_items
     ) if bad_items else "(none - all clear)"
+    blocking_summary = "; ".join(blocking) if blocking else "none"
 
     prev_shift_str = ""
     if prev_shift:
@@ -64,6 +66,8 @@ CURRENT LOGGED-IN USER:\n- First name: {first}\n- Last name: {ctx.get('last_name
 
 BAD ITEMS (needs attention before shift):
 {bad_summary}
+
+BLOCKING ITEMS (Form 4 - must fix before shift): {blocking_summary}
 
 RULES:
 - Prioritize BAD items. Inform the medic about outstanding items that need addressing.

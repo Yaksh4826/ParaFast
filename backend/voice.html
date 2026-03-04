@@ -1,0 +1,337 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width,initial-scale=1">
+<title>Para AI — Voice</title>
+<style>
+  *,*::before,*::after{box-sizing:border-box;margin:0;padding:0}
+  body{
+    font-family:'Segoe UI',system-ui,sans-serif;
+    background:#050a14;color:#c8d8f0;min-height:100vh;
+    display:flex;flex-direction:column;align-items:center;justify-content:center;
+  }
+  body::before{
+    content:'';position:fixed;inset:0;
+    background-image:linear-gradient(rgba(0,180,255,.03) 1px,transparent 1px),
+                      linear-gradient(90deg,rgba(0,180,255,.03) 1px,transparent 1px);
+    background-size:60px 60px;z-index:0;pointer-events:none;
+  }
+  #voice-panel{
+    position:relative;z-index:1;max-width:420px;padding:2rem;
+    background:rgba(0,10,28,.9);border:1px solid rgba(0,180,255,.25);border-radius:16px;
+    text-align:center;
+  }
+  #voice-panel h1{font-size:1.3rem;color:#00b4ff;margin-bottom:.25rem}
+  #voice-panel p.sub{font-size:.8rem;color:#5a8aa8;margin-bottom:1.5rem}
+  .waveform{
+    height:60px;display:flex;align-items:center;justify-content:center;gap:4px;margin:1.5rem 0;
+  }
+  .wave-bar{
+    width:4px;height:8px;background:rgba(0,180,255,.3);border-radius:2px;
+    transition:height .08s ease;
+  }
+  .wave-bar.active{height:32px;background:#00b4ff}
+  .voice-btn{
+    padding:.9rem 2rem;border:2px solid rgba(0,180,255,.5);border-radius:12px;
+    background:rgba(0,180,255,.15);color:#00b4ff;font-weight:700;font-size:1rem;
+    cursor:pointer;font-family:inherit;transition:all .2s;
+  }
+  .voice-btn:hover{background:rgba(0,180,255,.25);box-shadow:0 0 24px rgba(0,180,255,.2)}
+  .voice-btn.recording{background:rgba(255,80,80,.2);border-color:#ff5050;color:#ff8080;animation:pulse 1s infinite}
+  .voice-btn:disabled{opacity:.5;cursor:not-allowed}
+  @keyframes pulse{50%{opacity:.8}}
+  #transcript{font-size:.85rem;color:#8aa8c8;margin-top:1rem;min-height:1.5em}
+  #reply{font-size:.9rem;color:#c8d8f0;margin-top:.5rem;min-height:2em}
+  .auth-section{display:none}
+  .auth-section.show{display:block}
+  .field{margin:.75rem 0;text-align:left}
+  .field label{font-size:.7rem;text-transform:uppercase;color:#5a8aa8;display:block;margin-bottom:.25rem}
+  .field input{
+    width:100%;padding:.5rem;background:rgba(0,20,50,.6);border:1px solid rgba(0,180,255,.2);
+    border-radius:6px;color:#c8d8f0;font-size:.9rem;
+  }
+  .auth-btn{width:100%;padding:.6rem;margin-top:.5rem;cursor:pointer;background:rgba(0,180,255,.2);color:#00b4ff;border:1px solid rgba(0,180,255,.4);border-radius:6px;font-weight:600}
+  .auth-err{color:#ff6b6b;font-size:.8rem;margin-top:.5rem}
+  a{color:#00b4ff;text-decoration:none;font-size:.85rem;margin-top:1rem;display:inline-block}
+  a:hover{text-decoration:underline}
+</style>
+</head>
+<body>
+
+<div id="voice-panel">
+  <div id="auth-section" class="auth-section show">
+    <h1>Para AI Voice</h1>
+    <p class="sub">Log in to start your voice session</p>
+    <form id="auth-form" onsubmit="handleAuth(event)">
+      <div class="field">
+        <label>Badge Number</label>
+        <input id="a-badge" required placeholder="B001">
+      </div>
+      <div class="field">
+        <label>Password</label>
+        <input id="a-pass" type="password" required placeholder="••••••••">
+      </div>
+      <button type="submit" class="auth-btn">Log In</button>
+      <div class="auth-err" id="auth-err"></div>
+    </form>
+  </div>
+
+  <div id="voice-section" class="auth-section">
+    <h1>Para AI Voice</h1>
+    <p class="sub" id="user-label"></p>
+    <div class="waveform" id="waveform">
+      <span class="wave-bar"></span><span class="wave-bar"></span><span class="wave-bar"></span>
+      <span class="wave-bar"></span><span class="wave-bar"></span><span class="wave-bar"></span>
+      <span class="wave-bar"></span><span class="wave-bar"></span><span class="wave-bar"></span>
+      <span class="wave-bar"></span><span class="wave-bar"></span>
+    </div>
+    <button class="voice-btn" id="voice-btn" onclick="toggleSession()">Start Session</button>
+    <div id="transcript"></div>
+    <div id="reply"></div>
+    <a href="/">Back to Chat</a>
+  </div>
+</div>
+
+<script>
+const WS_BASE = (location.protocol === 'https:' ? 'wss:' : 'ws:') + '//' + location.host;
+const HTTP = location.origin;
+let isLoggedIn = false;
+let ws = null;
+
+async function checkSession() {
+  try {
+    const res = await fetch(`${HTTP}/auth/me`, { credentials: 'include' });
+    if (res.ok) {
+      const data = await res.json();
+      isLoggedIn = true;
+      document.getElementById('user-label').textContent = `${data.first_name || ''} ${data.last_name || ''} • ${data.badge_number || ''}`;
+      document.getElementById('auth-section').classList.remove('show');
+      document.getElementById('voice-section').classList.add('show');
+    }
+  } catch (_) {}
+}
+checkSession();
+let mediaRecorder = null;
+let mediaStream = null;
+let audioContext = null;
+let isRecording = false;
+let analyser = null;
+let animationId = null;
+
+async function handleAuth(e) {
+  e.preventDefault();
+  const err = document.getElementById('auth-err');
+  err.textContent = '';
+  const badge = document.getElementById('a-badge').value.trim();
+  const pass = document.getElementById('a-pass').value;
+  try {
+    const res = await fetch(`${HTTP}/auth/login`, {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ badge_number: badge, password: pass }),
+      credentials: 'include',
+    });
+    const data = await res.json();
+    if (!res.ok) { err.textContent = data.detail || 'Error'; return; }
+    isLoggedIn = true;
+    document.getElementById('user-label').textContent = `${data.name} • ${data.badge_number}`;
+    document.getElementById('auth-section').classList.remove('show');
+    document.getElementById('voice-section').classList.add('show');
+  } catch (ex) {
+    err.textContent = 'Connection failed';
+  }
+}
+
+function updateWaveform(active) {
+  const bars = document.querySelectorAll('.wave-bar');
+  if (!active) {
+    bars.forEach(b => { b.classList.remove('active'); b.style.height = '8px'; });
+    return;
+  }
+  function animate() {
+    if (!analyser) return;
+    const data = new Uint8Array(analyser.frequencyBinCount);
+    analyser.getByteFrequencyData(data);
+    const step = Math.floor(data.length / bars.length);
+    bars.forEach((b, i) => {
+      const v = data[i * step] || 0;
+      b.style.height = (8 + (v / 255) * 24) + 'px';
+      b.classList.toggle('active', v > 30);
+    });
+    if (isRecording) animationId = requestAnimationFrame(animate);
+  }
+  animate();
+}
+
+function stopPlayback() {
+  if (audioContext && audioContext.state !== 'closed') {
+    try { audioContext.close(); } catch (_) {}
+  }
+  audioContext = null;
+}
+
+async function playAudio(base64Data) {
+  stopPlayback();
+  audioContext = new (window.AudioContext || window.webkitAudioContext)();
+  const buf = Uint8Array.from(atob(base64Data), c => c.charCodeAt(0));
+  const ab = buf.buffer.slice(buf.byteOffset, buf.byteOffset + buf.byteLength);
+  const decoded = await audioContext.decodeAudioData(ab);
+  const src = audioContext.createBufferSource();
+  src.buffer = decoded;
+  src.connect(audioContext.destination);
+  src.onended = () => { audioContext.close(); };
+  src.start(0);
+}
+
+function connect() {
+  const url = `${WS_BASE}/ws/voice`;
+  ws = new WebSocket(url);
+  ws.binaryType = 'arraybuffer';
+
+  ws.onopen = () => {
+    document.getElementById('voice-btn').disabled = false;
+    document.getElementById('voice-btn').textContent = 'Listening... (click to stop)';
+    document.getElementById('voice-btn').classList.add('recording');
+    startRecording();
+  };
+
+  ws.onmessage = async (ev) => {
+    if (typeof ev.data === 'string') {
+      try {
+        const msg = JSON.parse(ev.data);
+        if (msg.type === 'loading') {
+          document.getElementById('reply').textContent = 'Para AI: ' + (msg.message || 'Thinking...');
+        }
+        if (msg.type === 'transcript') {
+          document.getElementById('transcript').textContent = 'You: ' + (msg.text || '(listening...)');
+          if (msg.reply) {
+            document.getElementById('reply').textContent = 'Para AI: ' + msg.reply;
+            document.getElementById('voice-btn').textContent = 'Start Session';
+            document.getElementById('voice-btn').classList.remove('recording');
+            document.getElementById('voice-btn').disabled = false;
+          }
+        }
+        if (msg.type === 'reply') document.getElementById('reply').textContent = 'Para AI: ' + msg.text;
+        if (msg.type === 'audio' && msg.data) {
+          if (isRecording) { stopRecording(); stopPlayback(); }
+          try {
+            await playAudio(msg.data);
+          } catch (e) {
+            document.getElementById('reply').textContent = 'Para AI: ' + (document.getElementById('reply').textContent.replace('Para AI: ', '') || '') + ' (audio playback failed)';
+          }
+          document.getElementById('voice-btn').textContent = 'Start Session';
+          document.getElementById('voice-btn').classList.remove('recording');
+          document.getElementById('voice-btn').disabled = false;
+        }
+        if (msg.type === 'error') {
+          document.getElementById('reply').textContent = 'Error: ' + msg.detail;
+          document.getElementById('voice-btn').textContent = 'Start Session';
+          document.getElementById('voice-btn').classList.remove('recording');
+          document.getElementById('voice-btn').disabled = false;
+        }
+      } catch (e) {
+        document.getElementById('reply').textContent = 'Error: Invalid response from server';
+      }
+    }
+  };
+
+
+  ws.onerror = () => {
+    document.getElementById('reply').textContent = 'Connection error. Is the server running?';
+    document.getElementById('voice-btn').disabled = false;
+    document.getElementById('voice-btn').textContent = 'Start Session';
+  };
+  ws.onclose = (ev) => {
+    ws = null;
+    stopRecording();
+    document.getElementById('voice-btn').textContent = 'Start Session';
+    document.getElementById('voice-btn').classList.remove('recording');
+    document.getElementById('voice-btn').disabled = false;
+    if (ev.code === 4001) document.getElementById('reply').textContent = 'Unauthorized. Please log in again.';
+  };
+}
+
+async function startRecording() {
+  if (!navigator.mediaDevices || !navigator.mediaDevices.getUserMedia) {
+    document.getElementById('reply').textContent = 'Error: Microphone not supported. Use HTTPS or localhost.';
+    return;
+  }
+  if (!window.MediaRecorder) {
+    document.getElementById('reply').textContent = 'Error: MediaRecorder not supported in this browser.';
+    return;
+  }
+  isRecording = true;
+  try {
+    mediaStream = await navigator.mediaDevices.getUserMedia({ audio: true });
+  } catch (e) {
+    document.getElementById('reply').textContent = 'Error: Microphone access denied.';
+    isRecording = false;
+    return;
+  }
+  const ctx = new (window.AudioContext || window.webkitAudioContext)();
+  const src = ctx.createMediaStreamSource(mediaStream);
+  analyser = ctx.createAnalyser();
+  analyser.fftSize = 256;
+  src.connect(analyser);
+  updateWaveform(true);
+
+  const mimeType = MediaRecorder.isTypeSupported('audio/webm;codecs=opus') ? 'audio/webm;codecs=opus' : 'audio/webm';
+  mediaRecorder = new MediaRecorder(mediaStream, { mimeType });
+  const chunks = [];
+  mediaRecorder.ondataavailable = (e) => {
+    if (e.data.size > 0) chunks.push(e.data);
+  };
+  mediaRecorder.onstop = () => {
+    if (chunks.length === 0 || !ws || ws.readyState !== WebSocket.OPEN) {
+      if (ws && ws.readyState === WebSocket.OPEN) {
+        ws.send(JSON.stringify({ type: 'end_utterance', data: '' }));
+      }
+      return;
+    }
+    const blob = new Blob(chunks, { type: mimeType });
+    const reader = new FileReader();
+    reader.onload = () => {
+      const arr = new Uint8Array(reader.result);
+      let binary = '';
+      for (let i = 0; i < arr.length; i++) binary += String.fromCharCode(arr[i]);
+      ws.send(JSON.stringify({ type: 'end_utterance', data: btoa(binary) }));
+    };
+    reader.readAsArrayBuffer(blob);
+  };
+  mediaRecorder.start(100);
+}
+
+function stopRecording() {
+  isRecording = false;
+  updateWaveform(false);
+  if (animationId) cancelAnimationFrame(animationId);
+  if (mediaRecorder && mediaRecorder.state !== 'inactive') {
+    mediaRecorder.stop();
+  }
+  if (mediaStream) {
+    mediaStream.getTracks().forEach(t => t.stop());
+    mediaStream = null;
+  }
+}
+
+function toggleSession() {
+  const btn = document.getElementById('voice-btn');
+  if (ws && ws.readyState === WebSocket.OPEN && isRecording) {
+    stopRecording();
+    btn.textContent = 'Processing...';
+    btn.classList.remove('recording');
+    btn.disabled = true;
+  } else if (ws && ws.readyState === WebSocket.OPEN && !isRecording) {
+    stopPlayback();
+    btn.textContent = 'Listening... (click to stop)';
+    btn.classList.add('recording');
+    startRecording();
+  } else {
+    btn.disabled = true;
+    connect();
+  }
+}
+</script>
+</body>
+</html>

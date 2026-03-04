@@ -28,11 +28,21 @@ load_dotenv(dotenv_path=ENV_PATH, override=False)
 try:
     from backend.app.agents.tools.scribe_data import fetch_scribe_context
     from backend.app.agents.tools.scribe_email import send_report_email
-    from backend.app.agents.tools.scribe_storage import save_draft
+    from backend.app.agents.tools.scribe_storage import get_draft, save_draft
 except ModuleNotFoundError:
     from app.agents.tools.scribe_data import fetch_scribe_context  # type: ignore
     from app.agents.tools.scribe_email import send_report_email  # type: ignore
-    from app.agents.tools.scribe_storage import save_draft  # type: ignore
+    from app.agents.tools.scribe_storage import get_draft, save_draft  # type: ignore
+
+# Form 1 (Occurrence) required fields per Backend Checklist Section A
+OCCURRENCE_REQUIRED = (
+    "current_datetime",
+    "occurrence_type",
+    "observation",
+    "service_unit",
+    "vehicle_id",
+    "report_creator",
+)
 
 
 # ---------------------------------------------------------------------------
@@ -62,17 +72,33 @@ def save_report_draft(report_json: str) -> dict:
     return save_draft(badge, full, status="pending")
 
 
+def _validate_occurrence(full: dict) -> list[str]:
+    """Validate Form 1 required fields. Returns list of missing field names."""
+    missing = []
+    for key in OCCURRENCE_REQUIRED:
+        val = full.get(key)
+        if not val or (isinstance(val, str) and not val.strip()):
+            missing.append(key.replace("_", " ").title())
+    return missing
+
+
 @tool
 def submit_report_now(report_json: str) -> dict:
     """Submit the report now. Generates PDF + XML, emails via Resend, marks as submitted.
     Use ONLY when the user has confirmed (e.g. 'yes', 'send it', 'go ahead').
-    For TEDDY forms: report_json MUST include report_type: 'teddy_bear', recipient_type, age, gender (if known)."""
+    For TEDDY forms: report_json MUST include report_type: 'teddy_bear', recipient_type, age, gender (if known).
+    For Occurrence (Form 1): MUST have date/time, type, observation, service, vehicle, creator - validate before submit."""
     try:
         report = json.loads(report_json)
     except json.JSONDecodeError:
         return {"status": "error", "detail": "Invalid JSON"}
     badge = report.get("badge_number", "UNKNOWN")
     full = _merge_silent_context(report, badge)
+    is_teddy = full.get("report_type") == "teddy_bear" or (full.get("recipient_type") and not full.get("occurrence_type"))
+    if not is_teddy:
+        missing = _validate_occurrence(full)
+        if missing:
+            return {"status": "error", "detail": f"Occurrence Report (Form 1) missing required fields: {', '.join(missing)}. Get these from the user before submitting."}
     email_result = send_report_email(full, badge)
     if email_result.get("status") == "sent":
         save_draft(badge, full, status="submitted")
@@ -88,8 +114,10 @@ _SCRIBE_PROMPT = """You are the Scribe Agent for EAI Ambulance Service.
 
 Today's date is {today} ({today_weekday}). The current year is {year}.
 
+STRICT: Never invent values. Only use data from the provided user context (Supabase) or what the user explicitly says.
+
 You have two tools:
-1. **save_report_draft** — saves the report to form_drafts with status 'pending'. Use when the user says draft, save for later, check later.
+1. **save_report_draft** — saves the report to form_drafts with status 'pending'. Use when the user says draft, save for later, check later. Also AUTO-SAVE: call this whenever you have collected 2+ fields and the user might leave (e.g. they go silent, change topic, or say "hold on").
 2. **submit_report_now** — generates PDF + XML, emails via Resend, marks as submitted. Use when the user says submit, send it, go ahead.
 
 {user_context}
@@ -100,12 +128,14 @@ Teddy form is DIFFERENT from occurrence. Teddy form has ONLY these 7 fields (no 
 - timestamp (current datetime)
 
 Rules:
+- In voice/text output, explicitly state form names: "I've started an Occurrence Report (Form 1)" or "I've started a Teddy Bear Form (Form 2)".
 - ALWAYS confirm before sending. Say "Want me to email it?" or "Ready to send?" Wait for yes, then submit_report_now. Teddy: save_report_draft first, then ask.
 - ALWAYS include report_type: "teddy_bear" in your JSON for teddy forms.
 - Occurrence: Same - confirm before submit. Ask "Want me to email it?"
 - Sensitivity: If conflict/HR/harassment, say "This sounds a bit sensitive. Want to switch to screen mode?" then continue.
 - Be conversational. Short, friendly, like a colleague. Draft: Got it, saved. Want me to email it? Submit: Sent. or Done.
-- If submit_report_now returns status: error, tell the user the error detail (e.g. "Email failed: [detail]") so they can fix it."""
+- If submit_report_now returns status: error, tell the user the error detail (e.g. "Email failed: [detail]") so they can fix it.
+- When status is "sent", say "Sent! Check your inbox (and spam folder) at the dispatch email." so they know where to look."""
 
 
 def _build_user_context(ctx: Dict[str, Any]) -> str:
@@ -161,7 +191,11 @@ def _build_scribe_messages(state: dict) -> tuple[list, Dict[str, Any]]:
 
     badge = state.get("badge_number", "")
     ctx = fetch_scribe_context(badge) if badge else {}
-    msgs = [SystemMessage(content=_build_scribe_prompt(ctx))]
+    draft = get_draft(badge) if badge else None
+    prompt = _build_scribe_prompt(ctx)
+    if draft and draft.get("content"):
+        prompt += "\n\nRESUME FLOW: User has a pending draft. First ask: 'Resume your previous report?' If yes, load the draft content and continue from where they left off. If no, start fresh."
+    msgs = [SystemMessage(content=prompt)]
 
     for msg in state["messages"]:
         if isinstance(msg, SystemMessage):

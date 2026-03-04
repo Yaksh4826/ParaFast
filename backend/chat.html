@@ -151,7 +151,10 @@
       <h2>ParaFast AI</h2>
       <span class="user-badge" id="user-label"></span>
     </div>
-    <button class="logout-btn" onclick="logout()">Log out</button>
+    <div style="display:flex;gap:.5rem;align-items:center">
+      <a href="/voice" style="font-size:.75rem;color:#00b4ff;text-decoration:none">Voice</a>
+      <button class="logout-btn" onclick="logout()">Log out</button>
+    </div>
   </div>
   <div id="messages"></div>
   <div id="input-row">
@@ -164,6 +167,20 @@
 const API = window.location.origin;
 let TOKEN = null;
 let MODE = 'login';
+
+async function checkSession() {
+  try {
+    const res = await fetch(`${API}/auth/me`, { credentials: 'include' });
+    if (res.ok) {
+      const data = await res.json();
+      TOKEN = 'cookie';
+      document.getElementById('user-label').textContent = `${data.first_name || ''} ${data.last_name || ''}  •  ${data.badge_number || ''}`;
+      document.getElementById('auth-panel').style.display = 'none';
+      document.getElementById('chat-panel').classList.add('visible');
+    }
+  } catch (_) {}
+}
+checkSession();
 
 function showTab(mode) {
   MODE = mode;
@@ -202,11 +219,12 @@ async function handleAuth(e) {
       method: 'POST',
       headers: { 'Content-Type': 'application/json' },
       body: JSON.stringify(body),
+      credentials: 'include',
     });
     const data = await res.json();
     if (!res.ok) { err.textContent = data.detail || 'Error'; return; }
 
-    TOKEN = data.access_token;
+    TOKEN = 'cookie';
     document.getElementById('user-label').textContent = `${data.name}  •  ${data.badge_number}`;
     document.getElementById('auth-panel').style.display = 'none';
     document.getElementById('chat-panel').classList.add('visible');
@@ -217,12 +235,7 @@ async function handleAuth(e) {
 }
 
 async function logout() {
-  if (TOKEN) {
-    fetch(`${API}/auth/logout`, {
-      method: 'POST',
-      headers: { 'Authorization': `Bearer ${TOKEN}` },
-    }).catch(() => {});
-  }
+  await fetch(`${API}/auth/logout`, { method: 'POST', credentials: 'include' }).catch(() => {});
   TOKEN = null;
   document.getElementById('auth-panel').style.display = '';
   document.getElementById('chat-panel').classList.remove('visible');
@@ -254,11 +267,9 @@ async function sendMessage() {
     const timer = setTimeout(() => ctrl.abort(), 120000);
     const res = await fetch(`${API}/chat`, {
       method: 'POST',
-      headers: {
-        'Content-Type': 'application/json',
-        'Authorization': `Bearer ${TOKEN}`,
-      },
+      headers: { 'Content-Type': 'application/json' },
       body: JSON.stringify({ message: text }),
+      credentials: 'include',
       signal: ctrl.signal,
     });
     clearTimeout(timer);
