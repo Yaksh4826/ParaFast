@@ -144,16 +144,25 @@ def _generate_occurrence_xml(report: Dict[str, Any]) -> bytes:
     return "\n".join(lines).encode("utf-8")
 
 
+def _get_from_address() -> str:
+    """Use verified domain if set, else Resend sandbox sender."""
+    custom = (os.getenv("RESEND_FROM_EMAIL") or "").strip()
+    if custom:
+        return custom
+    return "ParaFast AI <onboarding@resend.dev>"
+
+
 def send_report_email(report: Dict[str, Any], badge_number: str) -> Dict[str, Any]:
     """Send report via Resend with PDF + XML attachments. Teddy Bear Rule."""
-    api_key = os.getenv("RESEND_API_KEY", "")
-    target_email = os.getenv("TARGET_DISPATCH_EMAIL", "yakshpatel4826@gmail.com")
+    api_key = (os.getenv("RESEND_API_KEY") or "").strip()
+    target_email = (os.getenv("TARGET_DISPATCH_EMAIL") or "yakshpatel4826@gmail.com").strip()
 
     if not api_key:
         logger.error("RESEND_API_KEY not set in .env")
         return {"status": "error", "detail": "RESEND_API_KEY not configured in .env"}
 
     resend.api_key = api_key
+    from_addr = _get_from_address()
 
     # Teddy: report_type OR presence of recipient_type (kid/child/adult/elderly) = teddy form
     is_teddy = (
@@ -195,8 +204,8 @@ def send_report_email(report: Dict[str, Any], badge_number: str) -> Dict[str, An
         pdf_fn, xml_fn = "occurrence_report.pdf", "occurrence_report.xml"
 
     try:
-        resend.Emails.send({
-            "from": "ParaFast AI <onboarding@resend.dev>",
+        resp = resend.Emails.send({
+            "from": from_addr,
             "to": [target_email],
             "subject": subject,
             "html": html_body,
@@ -205,8 +214,9 @@ def send_report_email(report: Dict[str, Any], badge_number: str) -> Dict[str, An
                 {"filename": xml_fn, "content": base64.b64encode(xml_bytes).decode()},
             ],
         })
-        logger.info("Email sent successfully to %s", target_email)
-        return {"status": "sent", "to": target_email}
+        email_id = getattr(resp, "id", None) or (resp.get("id") if isinstance(resp, dict) else None)
+        logger.info("Email sent successfully to %s (id=%s)", target_email, email_id)
+        return {"status": "sent", "to": target_email, "id": email_id}
     except Exception as exc:
         logger.exception("Resend send failed: %s", exc)
         return {"status": "error", "detail": str(exc)}

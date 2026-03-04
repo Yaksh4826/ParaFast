@@ -1,10 +1,12 @@
 """Silent data retrieval for Para AI (Pre-Shift Checklist Agent).
 
 Fetches preshift_checks (BAD items) and profile + previous shift from Supabase.
+Form 4 (Checklist) logic: CERT-DL (Drivers License), ACRC blocking items.
 """
 
 from __future__ import annotations
 
+import re
 from datetime import date
 from pathlib import Path
 from typing import Any, Dict, List
@@ -18,6 +20,35 @@ try:
     from backend.database import get_supabase_client
 except ModuleNotFoundError:
     from database import get_supabase_client  # type: ignore
+
+
+async def check_preshift_status(badge_number: str) -> List[str]:
+    """Form 4: Load user-specific checklist and return blocking items.
+    Blocking: CERT-DL (Drivers License) BAD, ACRC overdue count."""
+    blocking: List[str] = []
+    try:
+        sb = get_supabase_client()
+        resp = (
+            sb.table("preshift_checks")
+            .select("check_type, status, detail")
+            .eq("badge_number", badge_number)
+            .eq("status", "BAD")
+            .execute()
+        )
+        for row in (resp.data or []):
+            ct = (row.get("check_type") or "").upper()
+            detail = row.get("detail") or ""
+            if "CERT-DL" in ct or "DRIVERS" in ct or "LICENSE" in ct:
+                blocking.append("Drivers License (CERT-DL)")
+            elif "ACRC" in ct:
+                match = re.search(r"(\d+)\s*overdue", detail, re.I) if detail else None
+                count = int(match.group(1)) if match else 1
+                blocking.append(f"{count} overdue ACRCs")
+            else:
+                blocking.append(detail or ct or "Item needs attention")
+    except Exception:
+        pass
+    return blocking
 
 
 def fetch_preshift_context(badge_number: str) -> Dict[str, Any]:
@@ -70,8 +101,10 @@ def fetch_preshift_context(badge_number: str) -> Dict[str, Any]:
                 }
                 for r in checks_resp.data
             ]
+        ctx["blocking_items"] = _blocking_from_bad_items(ctx["bad_items"])
     except Exception:
         ctx["bad_items"] = []
+        ctx["blocking_items"] = []
 
     today_iso = date.today().isoformat()
     try:
@@ -104,3 +137,20 @@ def fetch_preshift_context(badge_number: str) -> Dict[str, Any]:
         pass
 
     return ctx
+
+
+def _blocking_from_bad_items(bad_items: list) -> list:
+    """Map BAD items to Form 4 blocking labels (CERT-DL, ACRC)."""
+    blocking = []
+    for item in bad_items:
+        ct = (item.get("check_type") or "").upper()
+        detail = item.get("detail") or ""
+        if "CERT-DL" in ct or "DRIVERS" in ct or "LICENSE" in ct:
+            blocking.append("Drivers License (CERT-DL)")
+        elif "ACRC" in ct:
+            m = re.search(r"(\d+)\s*overdue", detail, re.I) if detail else None
+            count = int(m.group(1)) if m else 1
+            blocking.append(f"{count} overdue ACRCs")
+        else:
+            blocking.append(detail or ct or "Item needs attention")
+    return blocking
